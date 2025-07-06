@@ -39,12 +39,12 @@ jobs:
 
     - name: Build Validation Container
       run: |
-        docker build -t $VALIDATION_REPO:latest ./validation
+        docker build -t $VALIDATION_REPO:latest ./ecs/validation
         docker push $VALIDATION_REPO:latest
 
     - name: Build Transformation Container
       run: |
-        docker build -t $TRANSFORMATION_REPO:latest ./transformation
+        docker build -t $TRANSFORMATION_REPO:latest ./ecs/transformation
         docker push $TRANSFORMATION_REPO:latest
 
     - name: Deploy Step Function Definition
@@ -56,12 +56,12 @@ jobs:
           aws stepfunctions create-state-machine \
             --name $STEP_FUNCTION_NAME \
             --role-arn arn:aws:iam::605134436600:role/StepFunctionsECSExecutionRole \
-            --definition file://step_function_definition.json \
+            --definition file://infra/step-function-definition.json \
             --type STANDARD
         else
           echo "Updating Step Function..."
           aws stepfunctions update-state-machine \
             --state-machine-arn $STATE_MACHINE_ARN \
-            --definition file://step_function_definition.json \
+            --definition file://infra/step-function-definition.json \
             --role-arn arn:aws:iam::605134436600:role/StepFunctionsECSExecutionRole
         fi
