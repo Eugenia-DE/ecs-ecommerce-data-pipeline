@@ -1,0 +1,104 @@
+{
+  "Comment": "Real-time e-commerce KPI pipeline using ECS Fargate",
+  "StartAt": "ValidateData",
+  "States": {
+    "ValidateData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "LaunchType": "FARGATE",
+        "Cluster": "ecommerce-cluster",
+        "TaskDefinition": "ecommerce-validation-task",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "subnet-07a70f3144a0abc48",
+              "subnet-038fc83541c144d8d"
+            ],
+            "SecurityGroups": [
+              "sg-0fe52a7f3a1a327cf"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "validation",
+              "Environment": [
+                {
+                  "Name": "S3_OBJECT_KEY",
+                  "Value.$": "$.s3_object_key"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "ValidationFailed"
+        }
+      ],
+      "TimeoutSeconds": 120,
+      "Next": "TransformData"
+    },
+    "TransformData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "LaunchType": "FARGATE",
+        "Cluster": "ecommerce-cluster",
+        "TaskDefinition": "ecommerce-transformation-task",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "subnet-07a70f3144a0abc48",
+              "subnet-038fc83541c144d8d"
+            ],
+            "SecurityGroups": [
+              "sg-0fe52a7f3a1a327cf"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "transformation",
+              "Environment": [
+                {
+                  "Name": "S3_OBJECT_KEY",
+                  "Value.$": "$.s3_object_key"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "TransformationFailed"
+        }
+      ],
+      "TimeoutSeconds": 300,
+      "End": true
+    },
+    "ValidationFailed": {
+      "Type": "Fail",
+      "Error": "ValidationError",
+      "Cause": "Data validation task failed."
+    },
+    "TransformationFailed": {
+      "Type": "Fail",
+      "Error": "TransformationError",
+      "Cause": "KPI transformation task failed."
+    }
+  }
+}
