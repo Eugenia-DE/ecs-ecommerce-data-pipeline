@@ -1,5 +1,5 @@
 {
-  "Comment": "Real-time e-commerce KPI pipeline using ECS Fargate",
+  "Comment": "Real-time e-commerce KPI pipeline using ECS Fargate with validation branching",
   "StartAt": "ValidateData",
   "States": {
     "ValidateData": {
@@ -26,22 +26,10 @@
             {
               "Name": "validation",
               "Environment": [
-                {
-                  "Name": "S3_BUCKET",
-                  "Value.$": "$.bucket"
-                },
-                {
-                  "Name": "PRODUCTS_KEY",
-                  "Value.$": "$.products_key"
-                },
-                {
-                  "Name": "ORDERS_KEYS",
-                  "Value.$": "States.JsonToString($.orders_keys)"
-                },
-                {
-                  "Name": "ORDER_ITEMS_KEYS",
-                  "Value.$": "States.JsonToString($.order_items_keys)"
-                }
+                { "Name": "S3_BUCKET", "Value.$": "$.bucket" },
+                { "Name": "PRODUCTS_KEY", "Value.$": "$.products_key" },
+                { "Name": "ORDERS_KEYS", "Value.$": "States.JsonToString($.orders_keys)" },
+                { "Name": "ORDER_ITEMS_KEYS", "Value.$": "States.JsonToString($.order_items_keys)" }
               ]
             }
           ]
@@ -49,14 +37,23 @@
       },
       "Catch": [
         {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
+          "ErrorEquals": ["States.ALL"],
           "Next": "ValidationFailed"
         }
       ],
       "TimeoutSeconds": 120,
-      "Next": "TransformData"
+      "Next": "CheckValidationResult"
+    },
+    "CheckValidationResult": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ValidateData.ExitCode",
+          "NumericEquals": 0,
+          "Next": "TransformData"
+        }
+      ],
+      "Default": "ValidationFailed"
     },
     "TransformData": {
       "Type": "Task",
@@ -82,22 +79,10 @@
             {
               "Name": "transformation",
               "Environment": [
-                {
-                  "Name": "S3_BUCKET",
-                  "Value.$": "$.bucket"
-                },
-                {
-                  "Name": "PRODUCTS_KEY",
-                  "Value.$": "$.products_key"
-                },
-                {
-                  "Name": "ORDERS_KEYS",
-                  "Value.$": "States.JsonToString($.orders_keys)"
-                },
-                {
-                  "Name": "ORDER_ITEMS_KEYS",
-                  "Value.$": "States.JsonToString($.order_items_keys)"
-                }
+                { "Name": "S3_BUCKET", "Value.$": "$.bucket" },
+                { "Name": "PRODUCTS_KEY", "Value.$": "$.products_key" },
+                { "Name": "ORDERS_KEYS", "Value.$": "States.JsonToString($.orders_keys)" },
+                { "Name": "ORDER_ITEMS_KEYS", "Value.$": "States.JsonToString($.order_items_keys)" }
               ]
             }
           ]
@@ -105,9 +90,7 @@
       },
       "Catch": [
         {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
+          "ErrorEquals": ["States.ALL"],
           "Next": "TransformationFailed"
         }
       ],
