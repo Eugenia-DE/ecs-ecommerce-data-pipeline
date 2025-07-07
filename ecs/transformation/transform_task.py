@@ -6,6 +6,15 @@ from io import StringIO
 
 s3 = boto3.client("s3")
 
+def move_file(bucket, key, target_prefix):
+    try:
+        target_key = key.replace("raw/", target_prefix)
+        s3.copy_object(Bucket=bucket, CopySource={'Bucket': bucket, 'Key': key}, Key=target_key)
+        s3.delete_object(Bucket=bucket, Key=key)
+        print(f"[INFO] Moved file s3://{bucket}/{key} -> s3://{bucket}/{target_key}")
+    except Exception as e:
+        print(f"[ERROR] Failed to move file {key} to {target_prefix}: {e}")
+
 def read_csv_from_s3(bucket, key):
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
@@ -90,6 +99,13 @@ def main():
 
     print("\n[INFO] Order-Level KPIs")
     print(order_kpi.head())
+
+    # After successful processing, move all files from raw/ to processed/
+    move_file(bucket, products_key, "processed/")
+    for key in orders_keys:
+        move_file(bucket, key.strip(), "processed/")
+    for key in items_keys:
+        move_file(bucket, key.strip(), "processed/")
 
     sys.exit(0)
 
