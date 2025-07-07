@@ -10,7 +10,6 @@ env:
   VALIDATION_REPO: 605134436600.dkr.ecr.eu-west-1.amazonaws.com/ecommerce-validation
   TRANSFORMATION_REPO: 605134436600.dkr.ecr.eu-west-1.amazonaws.com/ecommerce-transformation
   STEP_FUNCTION_NAME: ecommerce-kpi-state-machine
-  STATE_MACHINE_ARN: arn:aws:states:eu-west-1:605134436600:stateMachine:ecommerce-kpi-state-machine
 
 jobs:
   deploy:
@@ -28,11 +27,12 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Upgrade AWS CLI
+    - name: Install AWS CLI v2 and update PATH
       run: |
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
         unzip awscliv2.zip
-        sudo ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+        sudo ./aws/install --install-dir /usr/local/aws-cli --bin-dir /usr/local/bin --update
+        export PATH=/usr/local/bin:$PATH
         aws --version
 
     - name: Log in to Amazon ECR
@@ -51,6 +51,7 @@ jobs:
 
     - name: Deploy Step Function Definition
       run: |
+        export PATH=/usr/local/bin:$PATH
         STATE_MACHINE_ARN=$(aws stepfunctions list-state-machines --query "stateMachines[?name=='$STEP_FUNCTION_NAME'].stateMachineArn" --output text)
 
         if [ -z "$STATE_MACHINE_ARN" ]; then
@@ -70,14 +71,15 @@ jobs:
 
     - name: Attach EventBridge Resource Policy to Step Function
       run: |
+        export PATH=/usr/local/bin:$PATH
         echo "Attaching resource policy to allow EventBridge to start the state machine..."
         aws stepfunctions put-resource-policy \
-          --resource-arn $STATE_MACHINE_ARN \
+          --resource-arn arn:aws:states:${{ env.AWS_REGION }}:605134436600:stateMachine:${{ env.STEP_FUNCTION_NAME }} \
           --statement '{
             "Effect": "Allow",
             "Principal": {
               "Service": "events.amazonaws.com"
             },
             "Action": "states:StartExecution",
-            "Resource": "'"$STATE_MACHINE_ARN"'"
+            "Resource": "arn:aws:states:${{ env.AWS_REGION }}:605134436600:stateMachine:${{ env.STEP_FUNCTION_NAME }}"
           }'
