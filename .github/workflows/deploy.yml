@@ -70,16 +70,25 @@ jobs:
         fi
 
     - name: Attach EventBridge Resource Policy to Step Function
-      run: |
-        export PATH=/usr/local/bin:$PATH
-        echo "Attaching resource policy to allow EventBridge to start the state machine..."
-        aws stepfunctions put-resource-policy \
-          --resource-arn arn:aws:states:${{ env.AWS_REGION }}:605134436600:stateMachine:${{ env.STEP_FUNCTION_NAME }} \
-          --statement '{
-            "Effect": "Allow",
-            "Principal": {
-              "Service": "events.amazonaws.com"
-            },
-            "Action": "states:StartExecution",
-            "Resource": "arn:aws:states:${{ env.AWS_REGION }}:605134436600:stateMachine:${{ env.STEP_FUNCTION_NAME }}"
-          }'
+      uses: docker://amazon/aws-cli:2.15.36
+      env:
+        AWS_REGION: ${{ env.AWS_REGION }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        STEP_FUNCTION_NAME: ${{ env.STEP_FUNCTION_NAME }}
+      with:
+        entrypoint: /bin/sh
+        args: >
+          -c "
+            STATE_MACHINE_ARN=$(aws stepfunctions list-state-machines --region $AWS_REGION --query \"stateMachines[?name=='$STEP_FUNCTION_NAME'].stateMachineArn\" --output text);
+            echo 'Attaching resource policy to $STATE_MACHINE_ARN';
+            aws stepfunctions put-resource-policy \
+              --region $AWS_REGION \
+              --resource-arn $STATE_MACHINE_ARN \
+              --statement '{
+                \"Effect\": \"Allow\",
+                \"Principal\": {\"Service\": \"events.amazonaws.com\"},
+                \"Action\": \"states:StartExecution\",
+                \"Resource\": \"*\"}'
+          "
+
