@@ -1,6 +1,7 @@
 import boto3
 import os
 import sys
+import json
 import pandas as pd
 from io import StringIO
 
@@ -50,12 +51,21 @@ def check_sample_nulls(df, required_columns, file_type, bucket, key):
 def main():
     bucket = os.environ.get("S3_BUCKET")
     products_key = os.environ.get("PRODUCTS_KEY")
-    orders_keys = os.environ.get("ORDERS_KEYS", "").split(",")
-    items_keys = os.environ.get("ORDER_ITEMS_KEYS", "").split(",")
+
+    try:
+        orders_keys = json.loads(os.environ["ORDERS_KEYS"])
+        items_keys = json.loads(os.environ["ORDER_ITEMS_KEYS"])
+    except Exception as e:
+        print(f"[ERROR] Failed to parse keys from environment: {e}")
+        sys.exit(1)
 
     if not all([bucket, products_key, orders_keys, items_keys]):
         print("[ERROR] Missing one or more required environment variables.")
         sys.exit(1)
+
+    print(f"[DEBUG] Products key: {products_key}")
+    print(f"[DEBUG] Orders keys: {orders_keys}")
+    print(f"[DEBUG] Order items keys: {items_keys}")
 
     # Validate products.csv
     print("Validating products.csv...")
@@ -66,7 +76,6 @@ def main():
     # Validate orders/*.csv
     print("Validating orders/*.csv...")
     for key in orders_keys:
-        key = key.strip()
         df_orders = read_csv_from_s3(bucket, key, sample=True)
         check_columns(df_orders, REQUIRED_COLUMNS["orders"], "orders", bucket, key)
         check_sample_nulls(df_orders, REQUIRED_COLUMNS["orders"], "orders", bucket, key)
@@ -74,12 +83,9 @@ def main():
     # Validate order_items/*.csv
     print("Validating order_items/*.csv...")
     for key in items_keys:
-        key = key.strip()
         df_items = read_csv_from_s3(bucket, key, sample=True)
         check_columns(df_items, REQUIRED_COLUMNS["order_items"], "order_items", bucket, key)
         check_sample_nulls(df_items, REQUIRED_COLUMNS["order_items"], "order_items", bucket, key)
-
-    # **DO NOT move files to processed here** — let transformation handle that
 
     print("Validation PASSED.")
     sys.exit(0)
