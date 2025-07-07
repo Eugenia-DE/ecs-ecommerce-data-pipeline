@@ -27,8 +27,20 @@
               "Name": "validation",
               "Environment": [
                 {
-                  "Name": "S3_OBJECT_KEY",
-                  "Value.$": "$.s3_object_key"
+                  "Name": "S3_BUCKET",
+                  "Value.$": "$.bucket"
+                },
+                {
+                  "Name": "PRODUCTS_KEY",
+                  "Value.$": "$.products_key"
+                },
+                {
+                  "Name": "ORDERS_KEYS",
+                  "Value.$": "States.JsonToString($.orders_keys)"
+                },
+                {
+                  "Name": "ORDER_ITEMS_KEYS",
+                  "Value.$": "States.JsonToString($.order_items_keys)"
                 }
               ]
             }
@@ -71,8 +83,20 @@
               "Name": "transformation",
               "Environment": [
                 {
-                  "Name": "S3_OBJECT_KEY",
-                  "Value.$": "$.s3_object_key"
+                  "Name": "S3_BUCKET",
+                  "Value.$": "$.bucket"
+                },
+                {
+                  "Name": "PRODUCTS_KEY",
+                  "Value.$": "$.products_key"
+                },
+                {
+                  "Name": "ORDERS_KEYS",
+                  "Value.$": "States.JsonToString($.orders_keys)"
+                },
+                {
+                  "Name": "ORDER_ITEMS_KEYS",
+                  "Value.$": "States.JsonToString($.order_items_keys)"
                 }
               ]
             }
