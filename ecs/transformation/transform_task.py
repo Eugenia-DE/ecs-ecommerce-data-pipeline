@@ -1,68 +1,70 @@
 import os
 import sys
 import boto3
-import pandas as pd
-from io import StringIO
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col, sum as _sum, avg, countDistinct, count, when, to_date
+)
 
-s3 = boto3.client("s3")
+s3_client = boto3.client("s3")
+
 
 def move_file(bucket, key, target_prefix):
     try:
         target_key = key.replace("raw/", target_prefix)
-        s3.copy_object(Bucket=bucket, CopySource={'Bucket': bucket, 'Key': key}, Key=target_key)
-        s3.delete_object(Bucket=bucket, Key=key)
+        s3_client.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": key}, Key=target_key)
+        s3_client.delete_object(Bucket=bucket, Key=key)
         print(f"[INFO] Moved file s3://{bucket}/{key} -> s3://{bucket}/{target_key}")
     except Exception as e:
-        print(f"[ERROR] Failed to move file {key} to {target_prefix}: {e}")
+        print(f"[ERROR] Failed to move file: {e}")
 
-def read_csv_from_s3(bucket, key):
-    try:
-        obj = s3.get_object(Bucket=bucket, Key=key)
-        return pd.read_csv(obj['Body'])
-    except Exception as e:
-        print(f"[ERROR] Could not read {key}: {e}")
-        sys.exit(1)
 
-def deep_null_check(df, required_columns, file_type):
-    nulls = df[required_columns].isnull().sum()
-    if nulls.any():
-        print(f"[ERROR] {file_type} contains nulls in:\n{nulls[nulls > 0]}")
-        sys.exit(1)
+def load_csv_spark(spark, bucket, key):
+    path = f"s3a://{bucket}/{key}"
+    return spark.read.option("header", "true").csv(path)
 
-def validate_referential(df_products, df_orders, df_items):
-    df_products = df_products.rename(columns={"id": "product_id"})
-    missing_products = df_items[~df_items["product_id"].isin(df_products["product_id"])]
-    missing_orders = df_items[~df_items["order_id"].isin(df_orders["order_id"])]
 
-    if not missing_products.empty:
-        print(f"[ERROR] {len(missing_products)} order_items rows have invalid product_id.")
-        sys.exit(1)
-    if not missing_orders.empty:
-        print(f"[ERROR] {len(missing_orders)} order_items rows have invalid order_id.")
-        sys.exit(1)
+def compute_kpis_spark(df_products, df_orders, df_items):
+    # Cast needed columns
+    df_products = df_products.withColumnRenamed("id", "product_id")
+    df_orders = df_orders.withColumn("order_date", to_date("created_at"))
+    df_items = df_items.withColumn("sale_price", col("sale_price").cast("double"))
 
-def compute_kpis(df_products, df_orders, df_items):
-    df_orders["order_date"] = pd.to_datetime(df_orders["created_at"]).dt.date
-    df_items = df_items.merge(df_products[["product_id", "category"]], on="product_id", how="left")
-    df_items = df_items.merge(df_orders[["order_id", "order_date", "user_id", "returned_at"]], on="order_id", how="left")
-    df_items["returned"] = df_items["returned_at"].notnull().astype(int)
+    # Join product category
+    df_items = df_items.join(df_products.select("product_id", "category"), on="product_id", how="left")
 
-    category_kpi = df_items.groupby(["category", "order_date"]).agg(
-        daily_revenue=("sale_price", "sum"),
-        avg_order_value=("sale_price", "mean"),
-        avg_return_rate=("returned", "mean")
-    ).reset_index()
+    # Join orders for date, user, and returns
+    df_items = df_items.join(
+        df_orders.select("order_id", "order_date", "user_id", "returned_at"),
+        on="order_id", how="left"
+    )
 
-    df_orders["returned"] = df_orders["returned_at"].notnull().astype(int)
-    order_kpi = df_orders.groupby("order_date").agg(
-        total_orders=("order_id", "nunique"),
-        total_revenue=("order_id", lambda x: df_items[df_items["order_id"].isin(x)]["sale_price"].sum()),
-        total_items_sold=("order_id", lambda x: df_items[df_items["order_id"].isin(x)].shape[0]),
-        return_rate=("returned", "mean"),
-        unique_customers=("user_id", "nunique")
-    ).reset_index()
+    # Create returned flag
+    df_items = df_items.withColumn("returned", when(col("returned_at").isNotNull(), 1).otherwise(0))
+
+    # Category-Level KPIs
+    category_kpi = df_items.groupBy("category", "order_date").agg(
+        _sum("sale_price").alias("daily_revenue"),
+        avg("sale_price").alias("avg_order_value"),
+        avg("returned").alias("avg_return_rate")
+    )
+
+    # Order-Level KPIs
+    df_orders = df_orders.withColumn("returned", when(col("returned_at").isNotNull(), 1).otherwise(0))
+
+    total_revenue_df = df_items.groupBy("order_id").agg(_sum("sale_price").alias("order_revenue"))
+    df_orders = df_orders.join(total_revenue_df, on="order_id", how="left")
+
+    order_kpi = df_orders.groupBy("order_date").agg(
+        countDistinct("order_id").alias("total_orders"),
+        _sum("order_revenue").alias("total_revenue"),
+        count("order_id").alias("total_items_sold"),  
+        avg("returned").alias("return_rate"),
+        countDistinct("user_id").alias("unique_customers")
+    )
 
     return category_kpi, order_kpi
+
 
 def main():
     bucket = os.environ.get("S3_BUCKET")
@@ -82,32 +84,35 @@ def main():
         print("[ERROR] No order_items files provided.")
         sys.exit(1)
 
-    df_products = read_csv_from_s3(bucket, products_key)
-    df_orders = pd.concat([read_csv_from_s3(bucket, key.strip()) for key in orders_keys], ignore_index=True)
-    df_items = pd.concat([read_csv_from_s3(bucket, key.strip()) for key in items_keys], ignore_index=True)
+    spark = SparkSession.builder \
+        .appName("KPITransformation") \
+        .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain") \
+        .getOrCreate()
 
-    deep_null_check(df_products, ["id", "sku", "cost", "category", "retail_price"], "products")
-    deep_null_check(df_orders, ["order_id", "user_id", "created_at"], "orders")
-    deep_null_check(df_items, ["order_id", "product_id", "sale_price"], "order_items")
+    # Load data
+    df_products = load_csv_spark(spark, bucket, products_key)
+    df_orders = spark.read.option("header", "true").csv([f"s3a://{bucket}/{key.strip()}" for key in orders_keys])
+    df_items = spark.read.option("header", "true").csv([f"s3a://{bucket}/{key.strip()}" for key in items_keys])
 
-    validate_referential(df_products, df_orders, df_items)
+    # Compute KPIs
+    category_kpi, order_kpi = compute_kpis_spark(df_products, df_orders, df_items)
 
-    category_kpi, order_kpi = compute_kpis(df_products, df_orders, df_items)
-
+    # Display top few results
     print("\n[INFO] Category-Level KPIs")
-    print(category_kpi.head())
+    category_kpi.show(5, truncate=False)
 
     print("\n[INFO] Order-Level KPIs")
-    print(order_kpi.head())
+    order_kpi.show(5, truncate=False)
 
-    # After successful processing, move all files from raw/ to processed/
+    # Move files from raw to processed
     move_file(bucket, products_key, "processed/")
     for key in orders_keys:
         move_file(bucket, key.strip(), "processed/")
     for key in items_keys:
         move_file(bucket, key.strip(), "processed/")
 
-    sys.exit(0)
+    spark.stop()
+
 
 if __name__ == "__main__":
     main()
