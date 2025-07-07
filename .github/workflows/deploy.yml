@@ -10,6 +10,7 @@ env:
   VALIDATION_REPO: 605134436600.dkr.ecr.eu-west-1.amazonaws.com/ecommerce-validation
   TRANSFORMATION_REPO: 605134436600.dkr.ecr.eu-west-1.amazonaws.com/ecommerce-transformation
   STEP_FUNCTION_NAME: ecommerce-kpi-state-machine
+  STATE_MACHINE_ARN: arn:aws:states:eu-west-1:605134436600:stateMachine:ecommerce-kpi-state-machine
 
 jobs:
   deploy:
@@ -27,11 +28,12 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Install AWS CLI (with --update)
+    - name: Upgrade AWS CLI
       run: |
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
         unzip awscliv2.zip
-        sudo ./aws/install --update
+        sudo ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+        aws --version
 
     - name: Log in to Amazon ECR
       id: login-ecr
@@ -50,7 +52,7 @@ jobs:
     - name: Deploy Step Function Definition
       run: |
         STATE_MACHINE_ARN=$(aws stepfunctions list-state-machines --query "stateMachines[?name=='$STEP_FUNCTION_NAME'].stateMachineArn" --output text)
-        
+
         if [ -z "$STATE_MACHINE_ARN" ]; then
           echo "Creating Step Function..."
           aws stepfunctions create-state-machine \
@@ -65,3 +67,17 @@ jobs:
             --definition file://infra/step-function-definition.json \
             --role-arn arn:aws:iam::605134436600:role/StepFunctionsECSExecutionRole
         fi
+
+    - name: Attach EventBridge Resource Policy to Step Function
+      run: |
+        echo "Attaching resource policy to allow EventBridge to start the state machine..."
+        aws stepfunctions put-resource-policy \
+          --resource-arn $STATE_MACHINE_ARN \
+          --statement '{
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "events.amazonaws.com"
+            },
+            "Action": "states:StartExecution",
+            "Resource": "'"$STATE_MACHINE_ARN"'"
+          }'
