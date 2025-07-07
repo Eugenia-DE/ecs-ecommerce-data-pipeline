@@ -27,13 +27,11 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Install AWS CLI v2 and update PATH
+    - name: Install AWS CLI (with --update)
       run: |
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
         unzip awscliv2.zip
-        sudo ./aws/install --install-dir /usr/local/aws-cli --bin-dir /usr/local/bin --update
-        export PATH=/usr/local/bin:$PATH
-        aws --version
+        sudo ./aws/install --update
 
     - name: Log in to Amazon ECR
       id: login-ecr
@@ -51,9 +49,8 @@ jobs:
 
     - name: Deploy Step Function Definition
       run: |
-        export PATH=/usr/local/bin:$PATH
         STATE_MACHINE_ARN=$(aws stepfunctions list-state-machines --query "stateMachines[?name=='$STEP_FUNCTION_NAME'].stateMachineArn" --output text)
-
+        
         if [ -z "$STATE_MACHINE_ARN" ]; then
           echo "Creating Step Function..."
           aws stepfunctions create-state-machine \
@@ -68,27 +65,3 @@ jobs:
             --definition file://infra/step-function-definition.json \
             --role-arn arn:aws:iam::605134436600:role/StepFunctionsECSExecutionRole
         fi
-
-    - name: Attach EventBridge Resource Policy to Step Function
-      uses: docker://amazon/aws-cli:2.15.36
-      env:
-        AWS_REGION: ${{ env.AWS_REGION }}
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        STEP_FUNCTION_NAME: ${{ env.STEP_FUNCTION_NAME }}
-      with:
-        entrypoint: /bin/sh
-        args: >
-          -c "
-            STATE_MACHINE_ARN=$(aws stepfunctions list-state-machines --region $AWS_REGION --query \"stateMachines[?name=='$STEP_FUNCTION_NAME'].stateMachineArn\" --output text);
-            echo 'Attaching resource policy to $STATE_MACHINE_ARN';
-            aws stepfunctions put-resource-policy \
-              --region $AWS_REGION \
-              --resource-arn $STATE_MACHINE_ARN \
-              --statement '{
-                \"Effect\": \"Allow\",
-                \"Principal\": {\"Service\": \"events.amazonaws.com\"},
-                \"Action\": \"states:StartExecution\",
-                \"Resource\": \"*\"}'
-          "
-
