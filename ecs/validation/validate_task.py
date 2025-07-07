@@ -13,6 +13,15 @@ REQUIRED_COLUMNS = {
 SAMPLE_SIZE = 100
 s3 = boto3.client("s3")
 
+def move_file(bucket, key, target_prefix):
+    try:
+        target_key = key.replace("raw/", target_prefix)
+        s3.copy_object(Bucket=bucket, CopySource={'Bucket': bucket, 'Key': key}, Key=target_key)
+        s3.delete_object(Bucket=bucket, Key=key)
+        print(f"[INFO] Moved file s3://{bucket}/{key} -> s3://{bucket}/{target_key}")
+    except Exception as e:
+        print(f"[ERROR] Failed to move file {key} to {target_prefix}: {e}")
+
 def read_csv_from_s3(bucket, key, sample=False):
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
@@ -21,18 +30,21 @@ def read_csv_from_s3(bucket, key, sample=False):
         return pd.read_csv(obj['Body'])
     except Exception as e:
         print(f"[ERROR] Failed to load s3://{bucket}/{key}: {e}")
+        move_file(bucket, key, "rejected/")
         sys.exit(1)
 
-def check_columns(df, required_columns, file_type):
+def check_columns(df, required_columns, file_type, bucket, key):
     missing = [col for col in required_columns if col not in df.columns]
     if missing:
         print(f"[ERROR] {file_type} missing required columns: {missing}")
+        move_file(bucket, key, "rejected/")
         sys.exit(1)
 
-def check_sample_nulls(df, required_columns, file_type):
+def check_sample_nulls(df, required_columns, file_type, bucket, key):
     nulls = df[required_columns].isnull().sum()
     if nulls.any():
         print(f"[ERROR] {file_type} contains nulls in required fields:\n{nulls[nulls > 0]}")
+        move_file(bucket, key, "rejected/")
         sys.exit(1)
 
 def main():
@@ -45,26 +57,29 @@ def main():
         print("[ERROR] Missing one or more required environment variables.")
         sys.exit(1)
 
+    # Validate products.csv
     print("Validating products.csv...")
     df_products = read_csv_from_s3(bucket, products_key, sample=True)
-    check_columns(df_products, REQUIRED_COLUMNS["products"], "products")
-    check_sample_nulls(df_products, REQUIRED_COLUMNS["products"], "products")
+    check_columns(df_products, REQUIRED_COLUMNS["products"], "products", bucket, products_key)
+    check_sample_nulls(df_products, REQUIRED_COLUMNS["products"], "products", bucket, products_key)
 
+    # Validate orders/*.csv
     print("Validating orders/*.csv...")
-    df_orders = pd.concat(
-        [read_csv_from_s3(bucket, key.strip(), sample=True) for key in orders_keys],
-        ignore_index=True
-    )
-    check_columns(df_orders, REQUIRED_COLUMNS["orders"], "orders")
-    check_sample_nulls(df_orders, REQUIRED_COLUMNS["orders"], "orders")
+    for key in orders_keys:
+        key = key.strip()
+        df_orders = read_csv_from_s3(bucket, key, sample=True)
+        check_columns(df_orders, REQUIRED_COLUMNS["orders"], "orders", bucket, key)
+        check_sample_nulls(df_orders, REQUIRED_COLUMNS["orders"], "orders", bucket, key)
 
+    # Validate order_items/*.csv
     print("Validating order_items/*.csv...")
-    df_items = pd.concat(
-        [read_csv_from_s3(bucket, key.strip(), sample=True) for key in items_keys],
-        ignore_index=True
-    )
-    check_columns(df_items, REQUIRED_COLUMNS["order_items"], "order_items")
-    check_sample_nulls(df_items, REQUIRED_COLUMNS["order_items"], "order_items")
+    for key in items_keys:
+        key = key.strip()
+        df_items = read_csv_from_s3(bucket, key, sample=True)
+        check_columns(df_items, REQUIRED_COLUMNS["order_items"], "order_items", bucket, key)
+        check_sample_nulls(df_items, REQUIRED_COLUMNS["order_items"], "order_items", bucket, key)
+
+    # **DO NOT move files to processed here** — let transformation handle that
 
     print("Validation PASSED.")
     sys.exit(0)
