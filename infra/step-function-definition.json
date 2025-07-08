@@ -1,5 +1,5 @@
 {
-  "Comment": "Real-time e-commerce KPI pipeline using ECS Fargate with validation branching",
+  "Comment": "Real-time e-commerce KPI pipeline using ECS Fargate",
   "StartAt": "ValidateData",
   "States": {
     "ValidateData": {
@@ -47,6 +47,8 @@
           ]
         }
       },
+      "InputPath": "$",
+      "ResultPath": "$.validation",
       "Catch": [
         {
           "ErrorEquals": [
@@ -62,7 +64,7 @@
       "Type": "Choice",
       "Choices": [
         {
-          "Variable": "$.ValidateData.ExitCode",
+          "Variable": "$.validation.Containers[0].ExitCode",
           "NumericEquals": 0,
           "Next": "TransformData"
         }
@@ -114,6 +116,8 @@
           ]
         }
       },
+      "InputPath": "$",
+      "ResultPath": "$.transformation",
       "Catch": [
         {
           "ErrorEquals": [
@@ -133,7 +137,7 @@
     "TransformationFailed": {
       "Type": "Fail",
       "Error": "TransformationError",
-      "Cause": "KPI transformation task failed."
+      "Cause": "Data transformation task failed."
     }
   }
 }
