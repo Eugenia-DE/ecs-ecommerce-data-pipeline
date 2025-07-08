@@ -29,7 +29,7 @@ def compute_kpis_spark(df_products, df_orders, df_items):
     df_products = df_products.withColumnRenamed("id", "product_id")
     df_orders = df_orders.withColumn("order_date", to_date("created_at"))
 
-    # Rename returned_at columns to distinguish them
+    # Handle nullable returned_at fields
     if "returned_at" in df_orders.columns:
         df_orders = df_orders.withColumnRenamed("returned_at", "returned_at_order")
     else:
@@ -42,25 +42,25 @@ def compute_kpis_spark(df_products, df_orders, df_items):
 
     df_items = df_items.withColumn("sale_price", col("sale_price").cast("double"))
 
-    # === Joins ===
+    # Joins
     df_items = df_items.join(df_products.select("product_id", "category"), on="product_id", how="left")
     df_items = df_items.join(
         df_orders.select("order_id", "order_date", "user_id", "returned_at_order"),
         on="order_id", how="left"
     )
 
-    # === Return Flags ===
+    # Flags
     df_items = df_items.withColumn("returned_item_flag", when(col("returned_at_item").isNotNull(), 1).otherwise(0))
     df_orders = df_orders.withColumn("returned_order_flag", when(col("returned_at_order").isNotNull(), 1).otherwise(0))
 
-    # === Category KPIs (from df_items) ===
+    # Category KPIs
     category_kpi = df_items.groupBy("category", "order_date").agg(
         _sum("sale_price").alias("daily_revenue"),
         avg("sale_price").alias("avg_order_value"),
         avg("returned_item_flag").alias("avg_return_rate")
     )
 
-    # === Order KPIs (from df_orders) ===
+    # Order KPIs
     total_revenue_df = df_items.groupBy("order_id").agg(_sum("sale_price").alias("order_revenue"))
     df_orders = df_orders.join(total_revenue_df, on="order_id", how="left")
 
@@ -84,9 +84,9 @@ def write_category_kpis_to_dynamodb(category_kpi_df):
             batch.put_item(Item={
                 "PK": f"CATEGORY#{row['category']}",
                 "SK": f"DATE#{row['order_date']}",
-                "daily_revenue": Decimal(str(row["daily_revenue"])),
-                "avg_order_value": Decimal(str(row["avg_order_value"])),
-                "avg_return_rate": Decimal(str(row["avg_return_rate"]))
+                "daily_revenue": Decimal(str(row["daily_revenue"] or 0)),
+                "avg_order_value": Decimal(str(row["avg_order_value"] or 0)),
+                "avg_return_rate": Decimal(str(row["avg_return_rate"] or 0))
             })
     print("[INFO] Finished writing category KPIs.")
 
@@ -99,11 +99,11 @@ def write_order_kpis_to_dynamodb(order_kpi_df):
         for row in rows:
             batch.put_item(Item={
                 "PK": f"DATE#{row['order_date']}",
-                "total_orders": int(row["total_orders"]),
-                "total_revenue": Decimal(str(row["total_revenue"])),
-                "total_items_sold": int(row["total_items_sold"]),
-                "return_rate": Decimal(str(row["return_rate"])),
-                "unique_customers": int(row["unique_customers"])
+                "total_orders": int(row["total_orders"] or 0),
+                "total_revenue": Decimal(str(row["total_revenue"] or 0)),
+                "total_items_sold": int(row["total_items_sold"] or 0),
+                "return_rate": Decimal(str(row["return_rate"] or 0)),
+                "unique_customers": int(row["unique_customers"] or 0)
             })
     print("[INFO] Finished writing order KPIs.")
 
@@ -133,9 +133,9 @@ def main():
 
     df_products = load_csv_spark(spark, bucket, products_key)
     order_paths = [f"s3a://{bucket}/{key.strip()}" for key in orders_keys]
-    df_orders = spark.read.option("header", "true").csv(*order_paths)
+    df_orders = spark.read.option("header", "true").csv(order_paths)
     item_paths = [f"s3a://{bucket}/{key.strip()}" for key in items_keys]
-    df_items = spark.read.option("header", "true").csv(*item_paths)
+    df_items = spark.read.option("header", "true").csv(item_paths)
 
     category_kpi, order_kpi = compute_kpis_spark(df_products, df_orders, df_items)
 
