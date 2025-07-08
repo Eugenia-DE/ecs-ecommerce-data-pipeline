@@ -4,10 +4,9 @@ import boto3
 from decimal import Decimal
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, sum as _sum, avg, countDistinct, count, when, to_date
+    col, sum as _sum, avg, countDistinct, count, when, to_date, lit
 )
 
-# S3 client for file movement
 s3_client = boto3.client("s3")
 
 
@@ -29,22 +28,39 @@ def load_csv_spark(spark, bucket, key):
 def compute_kpis_spark(df_products, df_orders, df_items):
     df_products = df_products.withColumnRenamed("id", "product_id")
     df_orders = df_orders.withColumn("order_date", to_date("created_at"))
+
+    # Rename returned_at columns to distinguish them
+    if "returned_at" in df_orders.columns:
+        df_orders = df_orders.withColumnRenamed("returned_at", "returned_at_order")
+    else:
+        df_orders = df_orders.withColumn("returned_at_order", lit(None))
+
+    if "returned_at" in df_items.columns:
+        df_items = df_items.withColumnRenamed("returned_at", "returned_at_item")
+    else:
+        df_items = df_items.withColumn("returned_at_item", lit(None))
+
     df_items = df_items.withColumn("sale_price", col("sale_price").cast("double"))
 
+    # === Joins ===
     df_items = df_items.join(df_products.select("product_id", "category"), on="product_id", how="left")
     df_items = df_items.join(
-        df_orders.select("order_id", "order_date", "user_id", "returned_at"),
+        df_orders.select("order_id", "order_date", "user_id", "returned_at_order"),
         on="order_id", how="left"
     )
-    df_items = df_items.withColumn("returned", when(col("returned_at").isNotNull(), 1).otherwise(0))
 
+    # === Return Flags ===
+    df_items = df_items.withColumn("returned_item_flag", when(col("returned_at_item").isNotNull(), 1).otherwise(0))
+    df_orders = df_orders.withColumn("returned_order_flag", when(col("returned_at_order").isNotNull(), 1).otherwise(0))
+
+    # === Category KPIs (from df_items) ===
     category_kpi = df_items.groupBy("category", "order_date").agg(
         _sum("sale_price").alias("daily_revenue"),
         avg("sale_price").alias("avg_order_value"),
-        avg("returned").alias("avg_return_rate")
+        avg("returned_item_flag").alias("avg_return_rate")
     )
 
-    df_orders = df_orders.withColumn("returned", when(col("returned_at").isNotNull(), 1).otherwise(0))
+    # === Order KPIs (from df_orders) ===
     total_revenue_df = df_items.groupBy("order_id").agg(_sum("sale_price").alias("order_revenue"))
     df_orders = df_orders.join(total_revenue_df, on="order_id", how="left")
 
@@ -52,7 +68,7 @@ def compute_kpis_spark(df_products, df_orders, df_items):
         countDistinct("order_id").alias("total_orders"),
         _sum("order_revenue").alias("total_revenue"),
         count("order_id").alias("total_items_sold"),
-        avg("returned").alias("return_rate"),
+        avg("returned_order_flag").alias("return_rate"),
         countDistinct("user_id").alias("unique_customers")
     )
 
