@@ -1,10 +1,13 @@
 import os
 import sys
 import boto3
+from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, sum as _sum, avg, countDistinct, count, when, to_date
 )
+from delta import configure_spark_with_delta_pip
+from pyspark.sql import DataFrame
 
 s3_client = boto3.client("s3")
 
@@ -19,12 +22,12 @@ def move_file(bucket, key, target_prefix):
         print(f"[ERROR] Failed to move file: {e}")
 
 
-def load_csv_spark(spark, bucket, key):
+def load_csv_spark(spark: SparkSession, bucket: str, key: str) -> DataFrame:
     path = f"s3a://{bucket}/{key}"
     return spark.read.option("header", "true").csv(path)
 
 
-def compute_kpis_spark(df_products, df_orders, df_items):
+def compute_kpis_spark(df_products: DataFrame, df_orders: DataFrame, df_items: DataFrame):
     df_products = df_products.withColumnRenamed("id", "product_id")
     df_orders = df_orders.withColumn("order_date", to_date("created_at"))
     df_items = df_items.withColumn("sale_price", col("sale_price").cast("double"))
@@ -78,12 +81,17 @@ def main():
         print("[ERROR] No order_items files provided.")
         sys.exit(1)
 
-    spark = SparkSession.builder \
-        .appName("KPITransformation") \
-        .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain") \
-        .getOrCreate()
+    run_date = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # Load data
+    # Delta-aware SparkSession
+    builder = SparkSession.builder.appName("KPITransformation") \
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+        .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain")
+
+    spark = configure_spark_with_delta_pip(builder).getOrCreate()
+
+    # Load input data
     df_products = load_csv_spark(spark, bucket, products_key)
 
     order_paths = [f"s3a://{bucket}/{key.strip()}" for key in orders_keys]
@@ -101,7 +109,20 @@ def main():
     print("\n[INFO] Order-Level KPIs")
     order_kpi.show(5, truncate=False)
 
-    # Move files from raw to processed
+    # Add run_date column for partitioning
+    category_kpi = category_kpi.withColumn("run_date", to_date(lit(run_date)))
+    order_kpi = order_kpi.withColumn("run_date", to_date(lit(run_date)))
+
+    # Save KPIs partitioned by run_date
+    category_kpi.write.format("delta").mode("overwrite") \
+        .partitionBy("run_date") \
+        .save(f"s3a://{bucket}/processed/kpis/category/")
+
+    order_kpi.write.format("delta").mode("overwrite") \
+        .partitionBy("run_date") \
+        .save(f"s3a://{bucket}/processed/kpis/order/")
+
+    # Move raw input files to processed/
     move_file(bucket, products_key, "processed/")
     for key in orders_keys:
         move_file(bucket, key.strip(), "processed/")
