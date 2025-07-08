@@ -137,15 +137,15 @@ def write_category_kpis_to_dynamodb(category_kpi_df):
     table = boto3.resource("dynamodb").Table("CategoryKPIs")
     # Convert Spark DataFrame to Pandas DataFrame, then to a list of dictionaries
     rows = category_kpi_df.toPandas().to_dict(orient="records")
-    
+
     # Use batch_writer for efficient writing
     with table.batch_writer() as batch:
         for row in rows:
             # Ensure all numeric types are converted to Decimal for DynamoDB
-            # Use 'category_id' and 'date_key' as per your DynamoDB schema
+            # Convert 'order_date' to string as DynamoDB String type expects a string
             batch.put_item(Item={
                 "category_id": row['category'],  # Partition Key
-                "date_key": row['order_date'],   # Sort Key
+                "date_key": str(row['order_date']),   # Sort Key - Converted to string
                 "daily_revenue": Decimal(str(row["daily_revenue"] or 0)),
                 "avg_order_value": Decimal(str(row["avg_order_value"] or 0)),
                 "avg_return_rate": Decimal(str(row["avg_return_rate"] or 0))
@@ -165,14 +165,14 @@ def write_order_kpis_to_dynamodb(order_kpi_df):
     table = boto3.resource("dynamodb").Table("DailyKPIs")
     # Convert Spark DataFrame to Pandas DataFrame, then to a list of dictionaries
     rows = order_kpi_df.toPandas().to_dict(orient="records")
-    
+
     # Use batch_writer for efficient writing
     with table.batch_writer() as batch:
         for row in rows:
             # Ensure all numeric types are converted appropriately for DynamoDB
-            # Use 'date_key' as the Partition Key as per your DynamoDB schema
+            # Convert 'order_date' to string as DynamoDB String type expects a string
             batch.put_item(Item={
-                "date_key": row['order_date'],  # Partition Key
+                "date_key": str(row['order_date']),  # Partition Key - Converted to string
                 "total_orders": int(row["total_orders"] or 0),
                 "total_revenue": Decimal(str(row["total_revenue"] or 0)),
                 "total_items_sold": int(row["total_items_sold"] or 0),
