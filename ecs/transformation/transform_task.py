@@ -1,14 +1,13 @@
 import os
 import sys
 import boto3
-from datetime import datetime
+from decimal import Decimal
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, sum as _sum, avg, countDistinct, count, when, to_date
 )
-from delta import configure_spark_with_delta_pip
-from pyspark.sql import DataFrame
 
+# S3 client for file movement
 s3_client = boto3.client("s3")
 
 
@@ -22,23 +21,21 @@ def move_file(bucket, key, target_prefix):
         print(f"[ERROR] Failed to move file: {e}")
 
 
-def load_csv_spark(spark: SparkSession, bucket: str, key: str) -> DataFrame:
+def load_csv_spark(spark, bucket, key):
     path = f"s3a://{bucket}/{key}"
     return spark.read.option("header", "true").csv(path)
 
 
-def compute_kpis_spark(df_products: DataFrame, df_orders: DataFrame, df_items: DataFrame):
+def compute_kpis_spark(df_products, df_orders, df_items):
     df_products = df_products.withColumnRenamed("id", "product_id")
     df_orders = df_orders.withColumn("order_date", to_date("created_at"))
     df_items = df_items.withColumn("sale_price", col("sale_price").cast("double"))
 
     df_items = df_items.join(df_products.select("product_id", "category"), on="product_id", how="left")
-
     df_items = df_items.join(
         df_orders.select("order_id", "order_date", "user_id", "returned_at"),
         on="order_id", how="left"
     )
-
     df_items = df_items.withColumn("returned", when(col("returned_at").isNotNull(), 1).otherwise(0))
 
     category_kpi = df_items.groupBy("category", "order_date").agg(
@@ -48,7 +45,6 @@ def compute_kpis_spark(df_products: DataFrame, df_orders: DataFrame, df_items: D
     )
 
     df_orders = df_orders.withColumn("returned", when(col("returned_at").isNotNull(), 1).otherwise(0))
-
     total_revenue_df = df_items.groupBy("order_id").agg(_sum("sale_price").alias("order_revenue"))
     df_orders = df_orders.join(total_revenue_df, on="order_id", how="left")
 
@@ -61,6 +57,39 @@ def compute_kpis_spark(df_products: DataFrame, df_orders: DataFrame, df_items: D
     )
 
     return category_kpi, order_kpi
+
+
+def write_category_kpis_to_dynamodb(category_kpi_df):
+    print("[INFO] Writing category KPIs to DynamoDB...")
+    table = boto3.resource("dynamodb").Table("CategoryKPIs")
+    rows = category_kpi_df.toPandas().to_dict(orient="records")
+    with table.batch_writer() as batch:
+        for row in rows:
+            batch.put_item(Item={
+                "PK": f"CATEGORY#{row['category']}",
+                "SK": f"DATE#{row['order_date']}",
+                "daily_revenue": Decimal(str(row["daily_revenue"])),
+                "avg_order_value": Decimal(str(row["avg_order_value"])),
+                "avg_return_rate": Decimal(str(row["avg_return_rate"]))
+            })
+    print("[INFO] Finished writing category KPIs.")
+
+
+def write_order_kpis_to_dynamodb(order_kpi_df):
+    print("[INFO] Writing order KPIs to DynamoDB...")
+    table = boto3.resource("dynamodb").Table("DailyKPIs")
+    rows = order_kpi_df.toPandas().to_dict(orient="records")
+    with table.batch_writer() as batch:
+        for row in rows:
+            batch.put_item(Item={
+                "PK": f"DATE#{row['order_date']}",
+                "total_orders": int(row["total_orders"]),
+                "total_revenue": Decimal(str(row["total_revenue"])),
+                "total_items_sold": int(row["total_items_sold"]),
+                "return_rate": Decimal(str(row["return_rate"])),
+                "unique_customers": int(row["unique_customers"])
+            })
+    print("[INFO] Finished writing order KPIs.")
 
 
 def main():
@@ -81,26 +110,17 @@ def main():
         print("[ERROR] No order_items files provided.")
         sys.exit(1)
 
-    run_date = datetime.utcnow().strftime("%Y-%m-%d")
+    spark = SparkSession.builder \
+        .appName("KPITransformation") \
+        .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain") \
+        .getOrCreate()
 
-    # Delta-aware SparkSession
-    builder = SparkSession.builder.appName("KPITransformation") \
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-        .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain")
-
-    spark = configure_spark_with_delta_pip(builder).getOrCreate()
-
-    # Load input data
     df_products = load_csv_spark(spark, bucket, products_key)
-
     order_paths = [f"s3a://{bucket}/{key.strip()}" for key in orders_keys]
     df_orders = spark.read.option("header", "true").csv(*order_paths)
-
     item_paths = [f"s3a://{bucket}/{key.strip()}" for key in items_keys]
     df_items = spark.read.option("header", "true").csv(*item_paths)
 
-    # Compute KPIs
     category_kpi, order_kpi = compute_kpis_spark(df_products, df_orders, df_items)
 
     print("\n[INFO] Category-Level KPIs")
@@ -109,20 +129,9 @@ def main():
     print("\n[INFO] Order-Level KPIs")
     order_kpi.show(5, truncate=False)
 
-    # Add run_date column for partitioning
-    category_kpi = category_kpi.withColumn("run_date", to_date(lit(run_date)))
-    order_kpi = order_kpi.withColumn("run_date", to_date(lit(run_date)))
+    write_category_kpis_to_dynamodb(category_kpi)
+    write_order_kpis_to_dynamodb(order_kpi)
 
-    # Save KPIs partitioned by run_date
-    category_kpi.write.format("delta").mode("overwrite") \
-        .partitionBy("run_date") \
-        .save(f"s3a://{bucket}/processed/kpis/category/")
-
-    order_kpi.write.format("delta").mode("overwrite") \
-        .partitionBy("run_date") \
-        .save(f"s3a://{bucket}/processed/kpis/order/")
-
-    # Move raw input files to processed/
     move_file(bucket, products_key, "processed/")
     for key in orders_keys:
         move_file(bucket, key.strip(), "processed/")
