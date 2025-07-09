@@ -1,7 +1,7 @@
 ### Real-Time Event-Driven Data Pipeline for E-Commerce Analytics
-This project details the design and implementation of a robust, real-time, event-driven data pipeline for an e-commerce platform. It leverages a suite of AWS-native services in a containerized environment to automate the ingestion, validation, transformation, and storage of transactional data for operational analytics.
+This documentation outlines a robust, real-time, event-driven data pipeline for an e-commerce platform. It leverages AWS-native services to automate the ingestion, validation, transformation, and storage of transactional data, providing near real-time Key Performance Indicators (KPIs) for operational analytics.
 
-### Project Objective
+1. Project Objective
 The primary objective is to establish an automated, scalable data pipeline that processes incoming e-commerce data files (products, orders, order items) in near real-time. Key goals include:
 
 Automated Ingestion: Detect new data files arriving in Amazon S3.
@@ -16,7 +16,7 @@ Workflow Orchestration: Automate the entire data flow, including error handling 
 
 Operational Visibility: Implement comprehensive logging and alerting mechanisms.
 
-### Architecture Overview
+2. Architecture Overview
 The pipeline operates on an event-driven paradigm, initiated by new file uploads to S3.
 
 +----------------+       +---------------------+       +---------------------------+
@@ -51,7 +51,7 @@ The pipeline operates on an event-driven paradigm, initiated by new file uploads
                                                           |  DailyKPIs)         |
                                                           +---------------------+
 
-### Core AWS Services Utilized
+Core AWS Services Utilized
 Service
 
 Purpose
@@ -88,7 +88,7 @@ Notification service for critical pipeline failures.
 Incoming data files are expected in CSV format and are uploaded to the raw/ prefix within the designated S3 bucket.
 
 S3 File Structure and Naming Convention
-To support robust batching and incremental processing, orders and order_items files are expected to be organized into date-partitioned subfolders.
+To support robust batching and incremental processing, orders and order_items files are ideally organized into date-partitioned subfolders.
 
 Products (Static Master Data):
 s3://[YOUR_BUCKET_NAME]/raw/products/products.csv
@@ -98,12 +98,14 @@ s3://[YOUR_BUCKET_NAME]/raw/orders/YYYY-MM-DD/orders_partX.csv
 (e.g., raw/orders/2025-07-09/orders_part1.csv)
 
 Order Items (Daily Batches):
-s3://[YOUR_BUCKET_NAME]/raw/order_items/YYYY-MM-DD/order_items_partX.csv
+s3://[YOUR_BUCKET_NAME]/raw/order_items/YYYY-MM-DD/order_items_partY.csv
 (e.g., raw/order_items/2025-07-09/order_items_part1.csv)
 
 Note: The Lambda trigger is designed to automatically assign the current UTC date as the batch ID if orders or order_items files are uploaded without the YYYY-MM-DD folder structure (e.g., directly into raw/orders/). While this provides flexibility, adhering to the date-partitioned structure is recommended for clearer data organization and historical traceability.
 
 Required Columns per Dataset
+The validation process strictly checks for the presence of these columns.
+
 Dataset
 
 Required Columns
@@ -120,110 +122,101 @@ order_items
 
 order_id, product_id, sale_price
 
-### Key Performance Indicators (KPIs)
-The transformation logic computes two primary types of KPIs, stored in dedicated DynamoDB tables.
+### Data Validation Rules
+The ecommerce-validation-task (an ECS Fargate container) performs the following data quality checks:
 
-### Category-Level KPIs (Stored in CategoryKPIs table)
-These KPIs provide daily insights into product category performance.
+Header Presence: Ensures that the incoming CSV file is not empty and contains at least a header row.
 
-Field
+Required Column Check: Verifies that all columns listed in the "Required Columns per Dataset" table (Section 3.1) are present in the uploaded file. If any are missing, the file is rejected.
 
-Description
+Null Value Check (Sample-Based): Inspects a sample of rows (defaulting to the first 100 rows) within the required columns to identify any null or empty values. If critical nulls are found, the file is rejected.
 
-DynamoDB Key/Type
+File Movement on Validation:
 
-category_id
+Success: Validated files are moved from raw/ to validated/ (e.g., s3://[YOUR_BUCKET_NAME]/validated/orders/YYYY-MM-DD/orders_partX.csv).
 
-Product category (e.g., "Electronics")
+Failure: Rejected files are moved from raw/ to invalid/ (e.g., s3://[YOUR_BUCKET_NAME]/invalid/orders/orders_partX.csv). A companion JSON file is also uploaded to invalid/ detailing the specific reason for rejection.
 
-Partition Key (String)
+Exit Codes: The validation task exits with a 0 (success) or a non-zero code (failure) to signal the outcome to AWS Step Functions.
 
-date_key
+### DynamoDB Schema
+The pipeline utilizes three DynamoDB tables, each with a specific schema designed for efficient data storage and retrieval.
 
-Date of the summarized orders (YYYY-MM-DD)
+## BatchFileTracker Table
+This table is crucial for the Lambda function to coordinate file arrivals and determine when a complete batch of data is ready for processing by Step Functions.
 
-Sort Key (String)
+Purpose: Tracks the ingestion status of products, orders, and order_items files for a given logical batch (daily data or the static products file).
 
-daily_revenue
+Primary Key:
 
-Total revenue from that category for the day
+Partition Key: BatchId (String)
 
-Attribute (Number)
+Values: products_master_data (for the static products file) or YYYY-MM-DD (for daily orders/order items batches, e.g., 2025-07-09).
 
-avg_order_value
+Attributes:
 
-Average value of individual orders in the category
+products_key (String): S3 key of the products.csv file.
 
-Attribute (Number)
+orders_keys (List of Strings): List of S3 keys for all orders files belonging to this batch.
 
-avg_return_rate
+order_items_keys (List of Strings): List of S3 keys for all order_items files belonging to this batch.
 
-Percentage of returned orders for the category
+products_file_arrived (Boolean): Flag indicating if products.csv has been processed.
 
-Attribute (Number)
+orders_files_arrived (Boolean): Flag indicating if all expected orders files for the batch have arrived.
 
-### Order-Level KPIs (Stored in DailyKPIs table)
-These KPIs provide a summarized view of overall daily order activity.
+order_items_files_arrived (Boolean): Flag indicating if all expected order_items files for the batch have arrived.
 
-Field
+step_function_triggered (Boolean): Flag indicating if the Step Functions workflow has been initiated for this batch.
 
-Description
+last_updated (String): ISO 8601 timestamp of the last update to the item.
 
-DynamoDB Key/Type
+status (String): Current status of the batch (e.g., IN_PROGRESS, TRIGGERED).
 
-date_key
+## CategoryKPIs Table
+Stores aggregated daily KPIs at the product category level.
 
-Date of the summarized orders (YYYY-MM-DD)
+Purpose: Provides insights into the performance of individual product categories over time.
 
-Partition Key (String)
+Primary Key:
 
-total_orders
+Partition Key: category_id (String)
 
-Count of unique orders
+Sort Key: date_key (String, format YYYY-MM-DD)
 
-Attribute (Number)
+Attributes:
 
-total_revenue
+daily_revenue (Number): Total revenue generated by the category on date_key.
 
-Total revenue from all orders
+avg_order_value (Number): Average value of orders within the category on date_key.
 
-Attribute (Number)
+avg_return_rate (Number): Percentage of returned items/orders for the category on date_key.
 
-total_items_sold
+## DailyKPIs Table
+Stores aggregated daily KPIs at the overall order level.
 
-Total number of items sold
+Purpose: Provides a high-level summary of daily e-commerce operational metrics.
 
-Attribute (Number)
+Primary Key:
 
-return_rate
+Partition Key: date_key (String, format YYYY-MM-DD)
 
-Percentage of orders that were returned
+Attributes:
 
-Attribute (Number)
+total_orders (Number): Count of unique orders on date_key.
 
-unique_customers
+total_revenue (Number): Total revenue from all orders on date_key.
 
-Number of distinct customers who placed orders
+total_items_sold (Number): Total number of items sold on date_key.
 
-Attribute (Number)
+return_rate (Number): Percentage of orders that were returned on date_key.
 
-### Pipeline Components and Flow
-5.1. S3 Event Trigger & Batch Coordination (AWS Lambda & DynamoDB)
-Mechanism: An S3 event notification (e.g., s3:ObjectCreated:Put) on the raw/ prefix triggers an AWS Lambda function (trigger-ecommerce-kpi-pipeline).
+unique_customers (Number): Count of distinct customers who placed orders on date_key.
 
-Batch Tracking: This Lambda function acts as a coordinator. It uses a dedicated DynamoDB table (BatchFileTracker) to atomically track the arrival of products.csv (as a products_master_data batch) and all parts of orders and order_items for a specific date (e.g., 2025-07-09).
+### Step Function Logic
+The AWS Step Functions state machine (ecommerce-pipeline-workflow) defines the precise flow and orchestration of the data processing tasks.
 
-BatchFileTracker DynamoDB Table Schema:
-
-Partition Key: BatchId (String) - e.g., "2025-07-09" or "products_master_data"
-
-Attributes: products_key, orders_keys (List of Strings), order_items_keys (List of Strings), product_file_arrived (Boolean), orders_files_arrived (Boolean), order_items_files_arrived (Boolean), step_function_triggered (Boolean), last_updated (String), status (String).
-
-Conditional Triggering: The Lambda only initiates an AWS Step Functions workflow if and only if all required data components (the products.csv file and all orders and order_items files for a specific date) are detected as arrived in the BatchFileTracker DynamoDB table, and the workflow for that batch has not been previously triggered. This prevents premature or duplicate processing.
-
-### Workflow Orchestration (AWS Step Functions)
-The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the end-to-end data processing.
-
+State Machine Definition (Simplified JSON)
 {
   "Comment": "Real-time e-commerce KPI pipeline using ECS Fargate",
   "StartAt": "ValidateData",
@@ -235,39 +228,16 @@ The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the 
         "LaunchType": "FARGATE",
         "Cluster": "ecommerce-cluster",
         "TaskDefinition": "ecommerce-validation-task",
-        "NetworkConfiguration": {
-          "AwsvpcConfiguration": {
-            "Subnets": [
-              "subnet-xxxxxxxxxxxxxxxxx",
-              "subnet-yyyyyyyyyyyyyyyyy"
-            ],
-            "SecurityGroups": [
-              "sg-zzzzzzzzzzzzzzzzz"
-            ],
-            "AssignPublicIp": "ENABLED"
-          }
-        },
+        "NetworkConfiguration": { /* ... VPC details ... */ },
         "Overrides": {
           "ContainerOverrides": [
             {
               "Name": "validation",
               "Environment": [
-                {
-                  "Name": "S3_BUCKET",
-                  "Value.$": "$.bucket"
-                },
-                {
-                  "Name": "PRODUCTS_KEY",
-                  "Value.$": "$.products_key"
-                },
-                {
-                  "Name": "ORDERS_KEYS",
-                  "Value.$": "States.JsonToString($.orders_keys)"
-                },
-                {
-                  "Name": "ORDER_ITEMS_KEYS",
-                  "Value.$": "States.JsonToString($.order_items_keys)"
-                }
+                { "Name": "S3_BUCKET", "Value.$": "$.bucket" },
+                { "Name": "PRODUCTS_KEY", "Value.$": "$.products_key" },
+                { "Name": "ORDERS_KEYS", "Value.$": "States.JsonToString($.orders_keys)" },
+                { "Name": "ORDER_ITEMS_KEYS", "Value.$": "States.JsonToString($.order_items_keys)" }
               ]
             }
           ]
@@ -275,25 +245,9 @@ The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the 
       },
       "InputPath": "$",
       "ResultPath": "$.validation",
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "States.TaskFailed",
-            "States.Timeout"
-          ],
-          "IntervalSeconds": 3,
-          "MaxAttempts": 2,
-          "BackoffRate": 2.0
-        }
-      ],
+      "Retry": [ /* ... retry configuration ... */ ],
       "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "PublishValidationFailureNotification",
-          "ResultPath": "$.error"
-        }
+        { "ErrorEquals": ["States.ALL"], "Next": "PublishValidationFailureNotification", "ResultPath": "$.error" }
       ],
       "TimeoutSeconds": 120,
       "Next": "CheckValidationResult"
@@ -301,11 +255,7 @@ The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the 
     "CheckValidationResult": {
       "Type": "Choice",
       "Choices": [
-        {
-          "Variable": "$.validation.Containers[0].ExitCode",
-          "NumericEquals": 0,
-          "Next": "TransformData"
-        }
+        { "Variable": "$.validation.Containers[0].ExitCode", "NumericEquals": 0, "Next": "TransformData" }
       ],
       "Default": "PublishValidationFailureNotification"
     },
@@ -314,10 +264,7 @@ The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the 
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
         "TopicArn": "arn:aws:sns:[YOUR_REGION]:[YOUR_ACCOUNT_ID]:ecommerce-pipeline-alerts",
-        "Message": {
-          "Input.$": "$",
-          "ErrorDetails.$": "$.error"
-        },
+        "Message": { "Input.$": "$", "ErrorDetails.$": "$.error" },
         "Subject": "E-commerce Pipeline Alert: Validation Failed"
       },
       "Next": "ValidationFailed"
@@ -329,39 +276,16 @@ The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the 
         "LaunchType": "FARGATE",
         "Cluster": "ecommerce-cluster",
         "TaskDefinition": "ecommerce-transformation-task",
-        "NetworkConfiguration": {
-          "AwsvpcConfiguration": {
-            "Subnets": [
-              "subnet-xxxxxxxxxxxxxxxxx",
-              "subnet-yyyyyyyyyyyyyyyyy"
-            ],
-            "SecurityGroups": [
-              "sg-zzzzzzzzzzzzzzzzz"
-            ],
-            "AssignPublicIp": "ENABLED"
-          }
-        },
+        "NetworkConfiguration": { /* ... VPC details ... */ },
         "Overrides": {
           "ContainerOverrides": [
             {
               "Name": "transformation",
               "Environment": [
-                {
-                  "Name": "S3_BUCKET",
-                  "Value.$": "$.bucket"
-                },
-                {
-                  "Name": "PRODUCTS_KEY",
-                  "Value.$": "$.products_key"
-                },
-                {
-                  "Name": "ORDERS_KEYS",
-                  "Value.$": "States.JsonToString($.orders_keys)"
-                },
-                {
-                  "Name": "ORDER_ITEMS_KEYS",
-                  "Value.$": "States.JsonToString($.order_items_keys)"
-                }
+                { "Name": "S3_BUCKET", "Value.$": "$.bucket" },
+                { "Name": "PRODUCTS_KEY", "Value.$": "$.products_key" },
+                { "Name": "ORDERS_KEYS", "Value.$": "States.JsonToString($.orders_keys)" },
+                { "Name": "ORDER_ITEMS_KEYS", "Value.$": "States.JsonToString($.order_items_keys)" }
               ]
             }
           ]
@@ -369,25 +293,9 @@ The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the 
       },
       "InputPath": "$",
       "ResultPath": "$.transformation",
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "States.TaskFailed",
-            "States.Timeout"
-          ],
-          "IntervalSeconds": 3,
-          "MaxAttempts": 2,
-          "BackoffRate": 2.0
-        }
-      ],
+      "Retry": [ /* ... retry configuration ... */ ],
       "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "PublishTransformationFailureNotification",
-          "ResultPath": "$.error"
-        }
+        { "ErrorEquals": ["States.ALL"], "Next": "PublishTransformationFailureNotification", "ResultPath": "$.error" }
       ],
       "TimeoutSeconds": 300,
       "End": true
@@ -397,126 +305,176 @@ The Step Functions state machine (ecommerce-pipeline-workflow) orchestrates the 
       "Resource": "arn:aws:states:::sns:publish",
       "Parameters": {
         "TopicArn": "arn:aws:sns:[YOUR_REGION]:[YOUR_ACCOUNT_ID]:ecommerce-pipeline-alerts",
-        "Message": {
-          "Input.$": "$",
-          "ErrorDetails.$": "$.error"
-        },
+        "Message": { "Input.$": "$", "ErrorDetails.$": "$.error" },
         "Subject": "E-commerce Pipeline Alert: Transformation Failed"
       },
       "Next": "TransformationFailed"
     },
-    "ValidationFailed": {
-      "Type": "Fail",
-      "Error": "ValidationError",
-      "Cause": "Data validation task failed."
-    },
-    "TransformationFailed": {
-      "Type": "Fail",
-      "Error": "TransformationError",
-      "Cause": "Data transformation task failed."
-    }
+    "ValidationFailed": { "Type": "Fail", "Error": "ValidationError", "Cause": "Data validation task failed." },
+    "TransformationFailed": { "Type": "Fail", "Error": "TransformationError", "Cause": "Data transformation task failed." }
   }
 }
 
-### Containerized ECS Tasks (Validation & Transformation)
-Your data processing logic is encapsulated within Docker containers, deployed to Amazon ECS using the Fargate launch type. This eliminates the need to manage underlying EC2 instances.
+Key Aspects of Step Function Logic:
+Input Parameters: The Step Function expects an input JSON containing bucket, products_key, orders_keys (list), and order_items_keys (list). These are passed from the AWS Lambda trigger.
 
-Validation Task (ecommerce-validation-task):
+ValidateData Task:
 
-Reads incoming CSV files from the raw/ S3 prefix.
+Invokes the ecommerce-validation-task ECS Fargate task.
 
-Performs schema validation (checks for required columns) and basic data quality checks (e.g., null values in critical fields).
+Passes S3 paths as environment variables to the container.
 
-On success, files are moved to validated/. On failure, files are moved to invalid/, and the task exits with a non-zero code, signaling Step Functions to trigger error handling.
+Configured with Retry policies for transient failures.
 
-Transformation Task (ecommerce-transformation-task):
+Includes a Catch block to handle any errors during validation, redirecting to an SNS notification.
 
-Reads validated CSV files from the validated/ S3 prefix.
+TimeoutSeconds: Prevents tasks from running indefinitely.
 
-Utilizes Apache Spark (running within the container) for distributed data processing.
+CheckValidationResult Choice State:
 
-Implements incremental loading: It identifies the specific order_dates present in the newly processed files and recalculates KPIs only for those dates, optimizing compute resources.
+Examines the ExitCode of the ValidateData ECS task.
 
-Computes Category-Level and Order-Level KPIs.
+If ExitCode is 0 (success), it proceeds to TransformData.
 
-Writes the resulting KPIs to the respective DynamoDB tables (CategoryKPIs, DailyKPIs).
+If ExitCode is non-zero (failure), it defaults to PublishValidationFailureNotification.
 
-Archives successfully processed files from validated/ to processed/ in S3.
+PublishValidationFailureNotification Task:
 
-ECS Task Environment Variables (Example for Step Functions Input):
+Publishes a message to an SNS topic (ecommerce-pipeline-alerts) to alert on validation failures. The message includes the original input and error details.
 
-The Step Functions workflow dynamically passes S3 paths to the ECS tasks via environment variables.
+TransformData Task:
 
-S3_BUCKET=ecommerce-event-pipeline
-PRODUCTS_KEY=raw/products/products.csv
-ORDERS_KEYS=["raw/orders/2025-07-09/orders_part1.csv", "raw/orders/2025-07-09/orders_part2.csv"]
-ORDER_ITEMS_KEYS=["raw/order_items/2025-07-09/order_items_part1.csv"]
+Invokes the ecommerce-transformation-task ECS Fargate task.
 
-### Robustness and Error Handling
-The pipeline is designed with fault tolerance and observability as core principles:
+Passes S3 paths (now referring to validated/ prefix) as environment variables.
 
-Retry Mechanism: Step Functions tasks (ValidateData, TransformData) are configured with retry logic (MaxAttempts, IntervalSeconds, BackoffRate) for transient failures (e.g., States.TaskFailed, States.Timeout).
+Also configured with Retry and Catch policies.
 
-Centralized Logging: All Lambda and ECS task stdout/stderr are streamed to Amazon CloudWatch Logs for real-time monitoring and debugging. Additionally, ECS tasks write detailed execution logs to S3 (logs/validation/, logs/transformation/) for long-term storage and analysis.
+PublishTransformationFailureNotification Task:
 
-Failure Notifications (SNS): Upon unrecoverable errors (after retries are exhausted) in the ValidateData or TransformData steps, an Amazon SNS topic (ecommerce-pipeline-alerts) is published. This can be configured to send email or other notifications to alert operations teams.
+Similar to the validation notification, sends an SNS alert for transformation failures.
 
-Dedicated Fail States: Step Functions includes ValidationFailed and TransformationFailed states, which explicitly terminate the workflow on critical errors, preserving the execution history for investigation.
+ValidationFailed and TransformationFailed Fail States:
 
-Data Segregation: Malformed or incomplete data files are automatically moved to an invalid/ S3 prefix by the validation task, preventing them from polluting downstream processes.
+Explicitly terminate the workflow on unrecoverable errors, providing clear error types and causes in the Step Functions execution history.
 
-Idempotent File Movement: The file movement logic (move_file function) is idempotent, ensuring that concurrent or retried operations do not lead to data duplication or corruption.
+### Simulation Steps
+Follow these steps to manually simulate and test the pipeline's functionality.
 
-Atomic Batch Tracking: The DynamoDB BatchFileTracker uses atomic updates and conditional expressions to ensure consistent state management, preventing race conditions and duplicate Step Functions triggers.
+Ensure All AWS Resources are Deployed:
 
-### IAM and Security
-Fine-grained IAM policies are applied to each AWS service role to adhere to the principle of least privilege:
+S3 Bucket: ecommerce-event-pipeline (or your chosen bucket name).
 
-Lambda Role: Permissions for s3:GetObject (implicitly via event), dynamodb:UpdateItem, dynamodb:GetItem on the BatchFileTracker table, and states:StartExecution on the Step Functions state machine.
+DynamoDB Tables:
 
-ECS Task Roles: Permissions for s3:GetObject, s3:PutObject, s3:DeleteObject on the ecommerce-event-pipeline bucket (specifically raw/, validated/, invalid/, processed/, logs/ prefixes), and dynamodb:PutItem (for KPI tables).
+BatchFileTracker (Partition Key: BatchId (String), No Sort Key).
 
-Step Functions Role: Permissions to invoke ECS tasks (ecs:RunTask), publish to SNS (sns:Publish), and manage its own executions.
+CategoryKPIs (Partition Key: category_id (String), Sort Key: date_key (String)).
 
-### Simulation and Testing Instructions
-To manually simulate the pipeline's functionality:
+DailyKPIs (Partition Key: date_key (String), No Sort Key).
 
-Ensure all AWS resources are deployed: S3 bucket, DynamoDB tables (CategoryKPIs, DailyKPIs, BatchFileTracker), Lambda function (trigger-ecommerce-kpi-pipeline), ECS Cluster, ECS Task Definitions, and the Step Functions State Machine.
+AWS Lambda Function: trigger-ecommerce-kpi-pipeline.
 
-Verify Lambda Environment Variables: Confirm PIPELINE_BATCH_TRACKER_TABLE is set to BatchFileTracker and STEP_FUNCTION_ARN is set to your Step Functions ARN.
+Environment Variables:
 
-Verify DynamoDB Schema: Ensure BatchFileTracker has BatchId (String) as its sole Partition Key.
+PIPELINE_BATCH_TRACKER_TABLE: Set to BatchFileTracker.
 
-Upload products.csv: Place your products.csv file into s3://[YOUR_BUCKET_NAME]/raw/products/products.csv.
+STEP_FUNCTION_ARN: Set to the ARN of your Step Functions state machine (e.g., arn:aws:states:[YOUR_REGION]:[YOUR_ACCOUNT_ID]:stateMachine:ecommerce-pipeline-workflow).
 
-Expected Lambda Log: You should see [INFO] Products master data batch updated. No Step Function trigger from this file directly.
+IAM Role: Ensure the Lambda's execution role has permissions for:
 
-Upload orders files: Place your orders_partX.csv files into a date-partitioned folder, e.g., s3://[YOUR_BUCKET_NAME]/raw/orders/2025-07-09/orders_part1.csv.
+s3:GetObject, s3:PutObject (for logs)
 
-Expected Lambda Log: [WARN] No date partition found... Assigning current UTC date... (if you don't use date partitions) or [INFO] Processing incoming file... for Batch ID: 2025-07-09 (if you use date partitions). DynamoDB BatchFileTracker will be updated.
+dynamodb:UpdateItem, dynamodb:GetItem on BatchFileTracker table.
 
-Upload order_items files: Place your order_items_partX.csv files into the same date-partitioned folder as the orders, e.g., s3://[YOUR_BUCKET_NAME]/raw/order_items/2025-07-09/order_items_part1.csv.
+states:StartExecution on your Step Functions state machine.
 
-Expected Lambda Log: Similar to orders.
+Amazon ECS: Cluster, Task Definitions (ecommerce-validation-task, ecommerce-transformation-task), and associated IAM roles for ECS tasks (with S3 read/write and DynamoDB write permissions).
 
-Once the last required file for a batch arrives (and products master data is ready): The Lambda logs should show [INFO] All required files for Daily Batch ID [DATE] and Products Master Data are ready. Preparing to trigger Step Function. followed by [INFO] Triggering Step Function with input: and the full payload.
+AWS Step Functions State Machine: ecommerce-pipeline-workflow (ensure Cluster and TaskDefinition names match your ECS setup, and TopicArn for SNS notifications is correct).
 
-Monitor Step Functions: Go to the AWS Step Functions console and observe the execution of your workflow.
+Initial File Upload (Products Master Data):
 
-Verify ValidateData and TransformData tasks run successfully.
+Upload your products.csv file to: s3://[YOUR_BUCKET_NAME]/raw/products/products.csv
 
-Check their CloudWatch Logs for detailed execution output.
+Observe Lambda Logs: Monitor the CloudWatch Logs for the trigger-ecommerce-kpi-pipeline Lambda. You should see:
+
+[INFO] Processing incoming file: s3://[YOUR_BUCKET_NAME]/raw/products/products.csv for Batch ID: products_master_data
+
+[INFO] Updated DynamoDB for Batch ID products_master_data with products file.
+
+[INFO] Products master data batch updated. No Step Function trigger from this file directly.
+
+Verify DynamoDB: Check the BatchFileTracker table in the DynamoDB console. You should find an item with BatchId: "products_master_data" and products_file_arrived: True.
+
+Upload Daily Batch Files (Orders & Order Items):
+
+Upload your orders_partX.csv files to s3://[YOUR_BUCKET_NAME]/raw/orders/. (If you use date-partitioned folders, e.g., raw/orders/2025-07-09/orders_part1.csv, the Lambda will use that date. Otherwise, it will default to the current UTC date).
+
+Upload your order_items_partY.csv files to s3://[YOUR_BUCKET_NAME]/raw/order_items/. (Similarly, use date-partitioned folders or let Lambda assign the current UTC date).
+
+Upload Order: s3://[YOUR_BUCKET_NAME]/raw/orders/orders_part1.csv
+
+Upload Order Item: s3://[YOUR_BUCKET_NAME]/raw/order_items/order_items_part1.csv
+
+Observe Lambda Logs: For each file upload, you should see:
+
+[WARN] No date partition found in key raw/orders/orders_partX.csv. Assigning current UTC date YYYY-MM-DD as Batch ID. (if not using date partitions)
+
+[INFO] Processing incoming file: s3://[YOUR_BUCKET_NAME]/raw/orders/orders_partX.csv for Batch ID: YYYY-MM-DD
+
+[INFO] Updated DynamoDB for Batch ID YYYY-MM-DD with orders file.
+
+[DEBUG] Global Products Master Data status: Ready=True, Key=raw/products/products.csv
+
+[DEBUG] Daily Batch YYYY-MM-DD status: Orders=[True/False], Items=[True/False], Triggered=False
+
+[INFO] Daily Batch ID YYYY-MM-DD not yet complete, or Products Master Data not ready, or already triggered. Waiting for more files. (This message is expected until all required files for the batch are detected).
+
+Triggering Step Functions: Once all required files for a given YYYY-MM-DD batch have been uploaded and processed by the Lambda (meaning both orders_files_arrived and order_items_files_arrived are True in DynamoDB, and products_master_data is Ready=True), the Lambda will log:
+
+[INFO] All required files for Daily Batch ID YYYY-MM-DD and Products Master Data are ready. Preparing to trigger Step Function.
+
+[INFO] Triggering Step Function with input: { ... full payload ... }
+
+[INFO] Step Function triggered for Daily Batch ID YYYY-MM-DD.
+
+[INFO] Marked Daily Batch ID YYYY-MM-DD as triggered in DynamoDB.
+
+Monitor Step Functions Execution:
+
+Go to the AWS Step Functions console and navigate to your ecommerce-pipeline-workflow state machine.
+
+You should see a new execution start. Monitor its progress through the ValidateData and TransformData steps.
+
+Check the associated CloudWatch Logs for the ECS tasks for detailed output during validation and transformation.
 
 Verify Data in S3:
 
-s3://[YOUR_BUCKET_NAME]/validated/ should contain the files after validation.
+After successful Step Functions execution:
 
-s3://[YOUR_BUCKET_NAME]/processed/ should contain the files after successful transformation.
+Check s3://[YOUR_BUCKET_NAME]/validated/: Files should temporarily appear here after validation.
 
-s3://[YOUR_BUCKET_NAME]/invalid/ (if any validation failures occur).
+Check s3://[YOUR_BUCKET_NAME]/processed/: Files should be moved here after successful transformation.
 
-s3://[YOUR_BUCKET_NAME]/logs/validation/ and logs/transformation/ should contain custom script logs.
+Check s3://[YOUR_BUCKET_NAME]/invalid/: If you intentionally upload malformed files, they will appear here with a _reason.json file.
 
-Verify KPIs in DynamoDB: Query your CategoryKPIs and DailyKPIs tables to confirm the computed KPIs are present and correctly structured.
+Check s3://[YOUR_BUCKET_NAME]/logs/validation/ and s3://[YOUR_BUCKET_NAME]/logs/transformation/: These folders should contain detailed log files from your ECS tasks.
 
-Test Failure Paths: Intentionally upload a malformed CSV (e.g., missing a required column) to raw/ and observe the pipeline's behavior (validation failure, SNS alert, file moved to invalid/).
+Verify KPIs in DynamoDB:
+
+Query your CategoryKPIs and DailyKPIs tables in the DynamoDB console.
+
+Confirm that the computed KPIs for the processed dates are present and correctly structured.
+
+Test Failure Paths (Optional but Recommended):
+
+Upload a orders_partX.csv file that is intentionally malformed (e.g., delete the order_id column or introduce nulls in created_at).
+
+Observe the Lambda logs (it should still process the event).
+
+Observe the Step Functions execution: It should proceed to ValidateData, fail, and then trigger the SNS notification.
+
+Check s3://[YOUR_BUCKET_NAME]/invalid/ to confirm the rejected file and its reason.
+
+Check your SNS subscription for the alert.
