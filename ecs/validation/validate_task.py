@@ -17,7 +17,14 @@ REQUIRED_COLUMNS = {
     "order_items": ["order_id", "product_id", "sale_price"]
 }
 
-# Define sample size for initial data checks
+# Define critical columns for null checks (subset of required columns)
+CRITICAL_NULL_CHECK_COLUMNS = {
+    "products": ["id", "sku", "cost", "category", "retail_price"],
+    "orders": ["order_id", "user_id", "created_at"],
+    "order_items": ["order_id", "product_id", "sale_price"]
+}
+
+# Define sample size for initial data checks (e.g., header and initial nulls)
 SAMPLE_SIZE = 100
 # Initialize S3 client
 s3 = boto3.client("s3")
@@ -54,27 +61,35 @@ def write_logs_to_s3(bucket, task_type):
         log_message("ERROR", f"Failed to upload logs to s3://{bucket}/{log_key}: {e}")
 
 
-def move_file(bucket, key, destination_prefix):
+def move_file(bucket, key, destination_prefix, reason=None):
     """
     Moves a file from its current S3 key (expected to be in 'raw/' prefix)
     to a new S3 key under the specified destination_prefix.
     This function is idempotent: it handles cases where the source file might
     no longer exist (e.g., already moved by a previous successful run).
+    If a reason is provided, a corresponding JSON file is uploaded.
 
     Args:
         bucket (str): The name of the S3 bucket.
         key (str): The current key (path) of the file in S3 (e.g., "raw/orders/order1.csv").
         destination_prefix (str): The new prefix (folder) where the file should be moved
                                   (e.g., "validated/" or "invalid/").
+        reason (str, optional): The reason for moving the file, especially for 'invalid/' moves.
     """
     source_key = key
     
     try:
         # Check if the source object exists before attempting to copy.
-        # If it doesn't exist, a ClientError with 'NoSuchKey' code will be raised.
         s3.head_object(Bucket=bucket, Key=source_key)
 
-        relative_path = source_key.replace("raw/", "")
+        # Determine the relative path to maintain folder structure
+        # Find the part of the key after the initial 'raw/' or 'validated/'
+        parts = source_key.split('/')
+        if parts[0] == 'raw' or parts[0] == 'validated':
+            relative_path = '/'.join(parts[1:])
+        else:
+            relative_path = source_key # Fallback if no known prefix
+
         target_key = os.path.join(destination_prefix, relative_path)
 
         # Copy the object to the new location
@@ -83,94 +98,123 @@ def move_file(bucket, key, destination_prefix):
         s3.delete_object(Bucket=bucket, Key=source_key)
         log_message("INFO", f"Moved file s3://{bucket}/{source_key} -> s3://{bucket}/{target_key}")
 
+        if reason and destination_prefix == "invalid/":
+            reason_key = target_key.replace(".csv", "_reason.json")
+            reason_content = json.dumps({
+                "original_key": source_key,
+                "rejected_key": target_key,
+                "reason": reason,
+                "timestamp": datetime.utcnow().isoformat()
+            }, indent=2)
+            s3.put_object(Bucket=bucket, Key=reason_key, Body=reason_content, ContentType="application/json")
+            log_message("INFO", f"Uploaded rejection reason to s3://{bucket}/{reason_key}")
+
     except ClientError as e:
-        # Handle the specific case where the source file does not exist (already moved or never existed)
         if e.response['Error']['Code'] == 'NoSuchKey':
             log_message("INFO", f"File s3://{bucket}/{source_key} not found. It might have already been moved or does not exist.")
         else:
-            # Re-raise other AWS ClientErrors
             log_message("ERROR", f"AWS Client Error moving file {source_key} to {destination_prefix}: {e}")
-            raise # Re-raise to ensure the task fails if it's a critical AWS error
+            raise # Re-raise other AWS ClientErrors
     except Exception as e:
-        # Catch any other unexpected exceptions during file movement
         log_message("ERROR", f"Failed to move file {source_key} to {destination_prefix}: {e}")
         raise # Re-raise to ensure the task fails on unexpected errors
 
 def read_csv_from_s3(bucket, key, file_type, sample=False):
     """
     Reads a CSV file from S3 into a Pandas DataFrame.
-    If reading fails, the file is moved to the 'invalid/' folder and the script exits.
-
-    Args:
-        bucket (str): The name of the S3 bucket.
-        key (str): The key (path) of the CSV file in S3.
-        file_type (str): A string indicating the type of file (e.g., "products", "orders").
-                         Used for logging and error messages.
-        sample (bool): If True, reads only a sample of rows (defined by SAMPLE_SIZE).
-
-    Returns:
-        pandas.DataFrame: The DataFrame loaded from the CSV.
+    If reading fails, logs an error and returns None.
     """
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
-        # Decode the body content from bytes to string before passing to StringIO
         csv_content = obj['Body'].read().decode('utf-8')
         if sample:
             df = pd.read_csv(StringIO(csv_content), nrows=SAMPLE_SIZE)
         else:
             df = pd.read_csv(StringIO(csv_content))
-        log_message("INFO", f"Successfully loaded {file_type} file: s3://{bucket}/{key}")
+        log_message("INFO", f"Successfully loaded {file_type} file: s3://{bucket}/{key} (sample={sample})")
         return df
     except Exception as e:
         log_message("ERROR", f"Failed to load {file_type} file s3://{bucket}/{key}: {e}")
-        # Move the problematic file to the 'invalid/' folder
-        move_file(bucket, key, "invalid/")
-        sys.exit(1) # Exit with error code to signal failure in Step Functions
+        return None # Return None on failure
 
-def check_columns(df, required_columns, file_type, bucket, key):
+def validate_schema_and_nulls(df, required_cols, critical_null_cols, file_type, bucket, key):
     """
-    Checks if all required columns are present in the DataFrame.
-    If missing, the file is moved to 'invalid/' and the script exits.
+    Performs schema conformity (column presence) and critical null checks on a DataFrame.
+    If checks fail, moves the file to 'invalid/' and exits.
 
     Args:
         df (pandas.DataFrame): The DataFrame to check.
-        required_columns (list): A list of column names that must be present.
+        required_cols (list): List of column names that must be present.
+        critical_null_cols (list): List of column names to check for nulls.
         file_type (str): Type of file for logging.
         bucket (str): S3 bucket name.
         key (str): S3 key of the file.
     """
-    missing = [col for col in required_columns if col not in df.columns]
-    if missing:
-        log_message("ERROR", f"{file_type} file s3://{bucket}/{key} missing required columns: {missing}")
-        # Move the problematic file to the 'invalid/' folder
-        move_file(bucket, key, "invalid/")
-        sys.exit(1) # Exit with error code
+    # 1. Schema Conformity Check
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        reason = f"Missing required columns: {', '.join(missing_cols)}"
+        log_message("ERROR", f"{file_type} file s3://{bucket}/{key} failed schema conformity: {reason}")
+        move_file(bucket, key, "invalid/", reason=reason)
+        sys.exit(1)
 
-def check_sample_nulls(df, required_columns, file_type, bucket, key):
-    """
-    Checks for null values in required columns within the DataFrame sample.
-    If nulls are found, the file is moved to 'invalid/' and the script exits.
-
-    Args:
-        df (pandas.DataFrame): The DataFrame sample to check.
-        required_columns (list): A list of column names to check for nulls.
-        file_type (str): Type of file for logging.
-        bucket (str): S3 bucket name.
-        key (str): S3 key of the file.
-    """
-    # Select only the required columns and check for nulls
-    null_counts = df[required_columns].isnull().sum()
-    # Filter for columns that have at least one null value
-    columns_with_nulls = null_counts[null_counts > 0]
-
-    if not columns_with_nulls.empty:
-        log_message("ERROR", f"{file_type} file s3://{bucket}/{key} contains nulls in required fields:\n{columns_with_nulls}")
-        # Move the problematic file to the 'invalid/' folder
-        move_file(bucket, key, "invalid/")
-        sys.exit(1) # Exit with error code
+    # 2. Missing/Null Fields Check (on relevant columns in the loaded sample)
+    # Ensure critical_null_cols are actually present in the DataFrame before checking
+    cols_to_check = [col for col in critical_null_cols if col in df.columns]
+    
+    if not cols_to_check:
+        log_message("WARN", f"No critical null check columns found in {file_type} file {key}. Skipping null check.")
     else:
-        log_message("INFO", f"No nulls found in required columns for {file_type} file: s3://{bucket}/{key}")
+        null_counts = df[cols_to_check].isnull().sum()
+        columns_with_nulls = null_counts[null_counts > 0]
 
+        if not columns_with_nulls.empty:
+            reason = f"Contains null values in critical fields: {columns_with_nulls.to_dict()}"
+            log_message("ERROR", f"{file_type} file s3://{bucket}/{key} failed null check on sample: {reason}")
+            move_file(bucket, key, "invalid/", reason=reason)
+            sys.exit(1)
+        else:
+            log_message("INFO", f"Schema and sample null checks passed for {file_type} file: s3://{bucket}/{key}")
+
+def check_referential_integrity(df_orders, df_products, df_order_items, bucket, all_raw_keys):
+    """
+    Checks referential integrity between order_items, orders, and products DataFrames.
+    - order_id in order_items must exist in orders.
+    - product_id in order_items must exist in products.
+    If integrity checks fail, logs an error, moves all raw files for the batch to 'invalid/', and exits.
+    """
+    log_message("INFO", "--- Starting Referential Integrity Checks ---")
+
+    validation_failed = False
+    rejection_reasons = []
+
+    # Check 1: order_id in order_items must exist in orders
+    # Use .isin() for efficient lookup
+    missing_order_ids_in_orders = df_order_items[~df_order_items['order_id'].isin(df_orders['order_id'])]['order_id'].unique()
+    if len(missing_order_ids_in_orders) > 0:
+        reason = f"Order IDs in order_items not found in orders: {missing_order_ids_in_orders[:5].tolist()}"
+        log_message("ERROR", f"Referential Integrity Error: {reason}")
+        rejection_reasons.append(reason)
+        validation_failed = True
+
+    # Check 2: product_id in order_items must exist in products
+    # Use .isin() for efficient lookup
+    missing_product_ids_in_products = df_order_items[~df_order_items['product_id'].isin(df_products['id'])]['product_id'].unique()
+    if len(missing_product_ids_in_products) > 0:
+        reason = f"Product IDs in order_items not found in products: {missing_product_ids_in_products[:5].tolist()}"
+        log_message("ERROR", f"Referential Integrity Error: {reason}")
+        rejection_reasons.append(reason)
+        validation_failed = True
+
+    if validation_failed:
+        full_reason = "Referential integrity checks failed: " + " | ".join(rejection_reasons)
+        log_message("ERROR", f"Referential integrity checks failed for the batch: {full_reason}. Moving all raw files to 'invalid/'.")
+        # Move all files related to this batch to invalid/
+        for key in all_raw_keys:
+            move_file(bucket, key, "invalid/", reason=full_reason)
+        sys.exit(1)
+    else:
+        log_message("INFO", "Referential integrity checks passed successfully.")
 
 def main():
     """
@@ -202,30 +246,53 @@ def main():
     log_message("DEBUG", f"Orders keys: {orders_keys}")
     log_message("DEBUG", f"Order items keys: {items_keys}")
 
-    # --- Validation Steps ---
+    # --- Individual File Validation (Schema & Sample Nulls) ---
+    # Load products file (full for referential integrity later)
+    log_message("INFO", "\n--- Validating products.csv (Schema & Sample Nulls) ---")
+    df_products = read_csv_from_s3(bucket, products_key, "products", sample=False) # Read full for RI
+    if df_products is None: # Check if read_csv_from_s3 failed
+        sys.exit(1) # Exit if products file couldn't be loaded
+    validate_schema_and_nulls(df_products, REQUIRED_COLUMNS["products"], CRITICAL_NULL_CHECK_COLUMNS["products"], "products", bucket, products_key)
+    log_message("INFO", f"Products file s3://{bucket}/{products_key} passed individual validation checks.")
 
-    log_message("INFO", "\n--- Validating products.csv ---")
-    df_products = read_csv_from_s3(bucket, products_key, "products", sample=True)
-    check_columns(df_products, REQUIRED_COLUMNS["products"], "products", bucket, products_key)
-    check_sample_nulls(df_products, REQUIRED_COLUMNS["products"], "products", bucket, products_key)
-    log_message("INFO", f"Products file s3://{bucket}/{products_key} passed validation checks.")
-
-    log_message("INFO", "\n--- Validating orders/*.csv ---")
+    # Load and validate all orders files
+    log_message("INFO", "\n--- Validating orders/*.csv (Schema & Sample Nulls) ---")
+    all_orders_dfs = []
     for key in orders_keys:
-        df_orders = read_csv_from_s3(bucket, key, "orders", sample=True)
-        check_columns(df_orders, REQUIRED_COLUMNS["orders"], "orders", bucket, key)
-        check_sample_nulls(df_orders, REQUIRED_COLUMNS["orders"], "orders", bucket, key)
-        log_message("INFO", f"Orders file s3://{bucket}/{key} passed validation checks.")
+        df_orders_part = read_csv_from_s3(bucket, key, "orders", sample=False)
+        if df_orders_part is None:
+            sys.exit(1) # Exit if any orders file couldn't be loaded
+        validate_schema_and_nulls(df_orders_part, REQUIRED_COLUMNS["orders"], CRITICAL_NULL_CHECK_COLUMNS["orders"], "orders", bucket, key)
+        log_message("INFO", f"Orders file s3://{bucket}/{key} passed individual validation checks.")
+        all_orders_dfs.append(df_orders_part)
+    
+    # Concatenate all orders parts into a single DataFrame for referential integrity
+    df_orders_full = pd.concat(all_orders_dfs, ignore_index=True) if all_orders_dfs else pd.DataFrame(columns=REQUIRED_COLUMNS["orders"])
+    log_message("INFO", f"Consolidated {len(all_orders_dfs)} orders files into a single DataFrame for referential integrity.")
 
-    log_message("INFO", "\n--- Validating order_items/*.csv ---")
+    # Load and validate all order_items files
+    log_message("INFO", "\n--- Validating order_items/*.csv (Schema & Sample Nulls) ---")
+    all_items_dfs = []
     for key in items_keys:
-        df_items = read_csv_from_s3(bucket, key, "order_items", sample=True)
-        check_columns(df_items, REQUIRED_COLUMNS["order_items"], "order_items", bucket, key)
-        check_sample_nulls(df_items, REQUIRED_COLUMNS["order_items"], "order_items", bucket, key)
-        log_message("INFO", f"Order items file s3://{bucket}/{key} passed validation checks.")
+        df_items_part = read_csv_from_s3(bucket, key, "order_items", sample=False) 
+        if df_items_part is None:
+            sys.exit(1) # Exit if any order_items file couldn't be loaded
+        validate_schema_and_nulls(df_items_part, REQUIRED_COLUMNS["order_items"], CRITICAL_NULL_CHECK_COLUMNS["order_items"], "order_items", bucket, key)
+        log_message("INFO", f"Order items file s3://{bucket}/{key} passed individual validation checks.")
+        all_items_dfs.append(df_items_part)
+
+    # Concatenate all order_items parts into a single DataFrame for referential integrity
+    df_order_items_full = pd.concat(all_items_dfs, ignore_index=True) if all_items_dfs else pd.DataFrame(columns=REQUIRED_COLUMNS["order_items"])
+    log_message("INFO", f"Consolidated {len(all_items_dfs)} order_items files into a single DataFrame for referential integrity.")
+
+    # --- Referential Integrity Check (Batch-level) ---
+    # Collect all original raw keys to move to invalid/ if RI fails
+    all_raw_keys_for_batch = [products_key] + orders_keys + items_keys
+    check_referential_integrity(df_orders_full, df_products, df_order_items_full, bucket, all_raw_keys_for_batch)
 
     # --- Move Validated Files to 'validated/' Folder ---
-    log_message("INFO", "\n--- All validations passed. Moving files to 'validated/' folder ---")
+    log_message("INFO", "\n--- All validations passed. Moving files from 'raw/' to 'validated/' folder ---")
+    
     # Move products file
     move_file(bucket, products_key, "validated/")
     # Move orders files
@@ -235,7 +302,7 @@ def main():
     for key in items_keys:
         move_file(bucket, key, "validated/")
 
-    log_message("INFO", "\nValidation PASSED for all files.")
+    log_message("INFO", "\nValidation PASSED for all files and referential integrity.")
     sys.exit(0) # Exit with success code
 
 if __name__ == "__main__":
@@ -248,4 +315,3 @@ if __name__ == "__main__":
             write_logs_to_s3(bucket, "validation")
         else:
             print("[ERROR] S3_BUCKET environment variable not set, cannot write logs to S3.")
-
