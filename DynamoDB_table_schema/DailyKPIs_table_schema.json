@@ -1,0 +1,26 @@
+{
+  "TableName": "DailyKPIs",
+  "KeySchema": [
+    {
+      "AttributeName": "date_key",
+      "KeyType": "HASH"
+    }
+  ],
+  "AttributeDefinitions": [
+    {
+      "AttributeName": "date_key",
+      "AttributeType": "S"
+    }
+  ],
+  "BillingMode": "PAY_PER_REQUEST",
+  "Tags": [
+    {
+      "Key": "Project",
+      "Value": "RetailDataPipeline"
+    },
+    {
+      "Key": "Environment",
+      "Value": "Development"
+    }
+  ]
+}
