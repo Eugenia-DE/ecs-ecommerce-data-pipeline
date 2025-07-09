@@ -49,12 +49,24 @@
       },
       "InputPath": "$",
       "ResultPath": "$.validation",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
       "Catch": [
         {
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "ValidationFailed"
+          "Next": "PublishValidationFailureNotification",
+          "ResultPath": "$.error"
         }
       ],
       "TimeoutSeconds": 120,
@@ -69,7 +81,20 @@
           "Next": "TransformData"
         }
       ],
-      "Default": "ValidationFailed"
+      "Default": "PublishValidationFailureNotification"
+    },
+    "PublishValidationFailureNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-1:605134436600:ecommerce-pipeline-alerts",
+        "Message": {
+          "Input.$": "$",
+          "ErrorDetails.$": "$.error"
+        },
+        "Subject": "E-commerce Pipeline Alert: Validation Failed"
+      },
+      "Next": "ValidationFailed"
     },
     "TransformData": {
       "Type": "Task",
@@ -118,16 +143,41 @@
       },
       "InputPath": "$",
       "ResultPath": "$.transformation",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
       "Catch": [
         {
           "ErrorEquals": [
             "States.ALL"
           ],
-          "Next": "TransformationFailed"
+          "Next": "PublishTransformationFailureNotification",
+          "ResultPath": "$.error"
         }
       ],
       "TimeoutSeconds": 300,
       "End": true
+    },
+    "PublishTransformationFailureNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-1:605134436600:ecommerce-pipeline-alerts",
+        "Message": {
+          "Input.$": "$",
+          "ErrorDetails.$": "$.error"
+        },
+        "Subject": "E-commerce Pipeline Alert: Transformation Failed"
+      },
+      "Next": "TransformationFailed"
     },
     "ValidationFailed": {
       "Type": "Fail",
